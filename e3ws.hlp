@@ -1,0 +1,23 @@
+This is mini editor e3 (WS mode)  v0.9 /  GPL  /  (C) 2000 Albrecht Kleine
+
+Currently there's no file loaded. So now let's have a look at some help text:
+Additionaly to CURSOR MOVEMENT keys you can use control keys as follows:
+
+Files:	^KR: Insert	   ^KS: Save	   ^KX: Save & Exit  ^KQ: Abort & Exit
+	^KD: Save&Load New
+Blocks:	^KB: Block Start   ^KK: Block End  ^KC: Block Copy   ^KY: Block Delete
+	^KV: Block Move	   ^KW: Save Block
+Search:	^QF: Find Word	   ^L: Repeat	   ^QA: Search & Replace
+
+Move	^E: Up		   ^X: Down	   ^S:  Left	     ^D: Right
+	^R: Page Up	   ^C: Page Down
+
+Quick-	^QE: Window Top	   ^QX: Wnd Bottom ^QS: Start o.Line  ^QD: End Of Line
+-Move:	^QR: BOF	   ^QC: EOF	   ^QB: Block Begin   ^QK: Block End
+	^QZ: Next Word	   ^QW: Prev Word  ^QI: Goto Line #   ^QV: Go Last Find
+
+Delete:	^T: Next Word	   ^Y: Line	   ^H: Left Char      ^G: This Char
+	^QY: Line End	   ^QDel,^QH: Line Begin
+
+
+Enter a filename to start editing....

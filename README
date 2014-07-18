@@ -1,0 +1,22 @@
+See ../README for details on e3
+
+This e3c does support WS key bindings only,
+based on e3 version 0.6 . 
+(For comparation purposes this file is still included 
+as e3.asm_base_for_e3c , former labeled as build #76.)
+
+BTW: it might look like assembler code, 
+but in fact e3c is really C code (for gcc).
+It was the result of some experiments in
+generating C code from asm code by using 
+a combination of lex/yacc parser tools.
+
+Another hint: I have got some intersting success stories,
+for example linking against dietlibc getting small binaries.
+See http://www.fefe.de/dietlibc/
+
+
+Last but not least:
+Thanks to Christian Ostheimer for adaption to mipsel (fritz box fon).
+
+                

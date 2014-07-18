@@ -1,0 +1,2401 @@
+;----------------------------------------------------------------------
+;
+;  e3 v0.6   Copyright (C) 2000 Albrecht Kleine  <kleine@ak.sax.de>
+;
+;  This program is free software; you can redistribute it and/or modify
+;  it under the terms of the GNU General Public License as published by
+;  the Free Software Foundation; either version 2 of the License, or
+;  (at your option) any later version.
+;
+;  This program is distributed in the hope that it will be useful,
+;  but WITHOUT ANY WARRANTY; without even the implied warranty of
+;  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;  GNU General Public License for more details.
+;
+;  You should have received a copy of the GNU General Public License
+;  along with this program; if not, write to the Free Software
+;  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+;
+;----------------------------------------------------------------------
+;;;;;;%include 'e3.inc'			;define where the helper files are
+;;;;;;					;file is created by "make"
+%define LIBDIR "/usr/local/lib/"
+ 
+%ifdef LINUX
+	%define CURSORMGNT
+%else
+	%undef CRIPLED_ELF
+%endif
+;
+;----------------------------------------------------------------------
+%define LESSWRITEOPS			;NEW for e3 0.5
+;
+section .text				;here it goes....
+bits 32  
+
+%ifdef CRIPLED_ELF
+;
+; building e3 via "nasm -f bin ...."  using an idea from 
+;"A Whirlwind Tutorial on Creating Really Teensy ELF Executables for Linux"
+;
+	org 0x08048000
+ehdr:	db 0x7F, "ELF", 1, 1, 1, 0	;Elf32_Ehdr starts here
+	dd 0,0
+	dw 2				;e_type
+	dw 3				;e_machine
+	dd 1				;e_version
+	dd _start			;e_entry
+	dd phdr1- $$			;e_phoff
+	dd 0				;e_shoff
+	dd 0				;e_flags
+	dw ehdrsize			;e_ehsize
+	dw phdrsize			;e_phentsize
+	dw 2				;e_phnum
+phdr1:					;Elf32_Phdr starts here
+	dd 1				;both p_type and e_shentsize,e_shnum
+	dw 0				;both p_offset and e_shstrndx
+ehdrsize equ $ - ehdr
+	dw 0
+	dd $$				;p_vaddr
+	dd $$				;p_paddr
+	dd filesize			;p_filesz
+	dd filesize			;p_memsz
+	dd 5				;p_flags i.e. READ/EXECUTE
+	dd 0;  0x1000			;p_align
+phdrsize equ $ - phdr1
+phdr2:					;another Elf32_Phdr starts here
+	dd 1				;p_type
+	dd filesize
+	dd $$+filesize
+	dd $$+filesize
+	dd 0				;p_filesz
+	dd bsssize			;p_memsz
+	dd 6				;p_flags i.e. READ/WRITE
+	dd 0;  0x1000			;p_align
+%endif
+;
+;
+%ifdef LESSWRITEOPS			;constraints
+	%define LESSWRITEOPS_OR_CURSORMGNT
+%endif
+%ifdef CURSORMGNT
+	%define LESSWRITEOPS_OR_CURSORMGNT
+%endif
+;
+global _start
+;
+; start with OUTER editor loop
+;
+_start:	call SetTermStruc
+	call ReadResource
+%ifdef BEOS
+	pop eax
+	pop ebx				;args counter (1....x)
+	xor esi,esi			;init for 'no args'
+	dec ebx
+	jz noarg
+	pop esi
+	mov esi,[esi]			;points to our_name0[args]0env.....
+	cld
+prog:	lodsb
+	or al,al
+	jne prog
+noarg:	;continued...
+%else
+	pop eax				;Linux: arguments #
+	pop ebx				;Linux: argv[0]
+	pop esi				;Linux: esi points to first arg (filename)	
+%endif
+;-------
+%ifdef CURSORMGNT
+	or esi,esi			
+	jz moreenv
+morearg:pop ecx				;arguments until NULL
+	or ecx,ecx
+        jnz morearg
+;-------
+moreenv:pop ecx
+	jecxz ReStart
+	cmp dword[ecx],'TERM'		;a short test for "TERM=linux"
+	jnz moreenv
+	cmp dword[ecx+5],'linu'
+	jnz ReStart
+	add byte[revvoff],boldlen	;special inverse cursor on linux terminals
+%endif	
+;-------
+ReStart:call NewFile
+	jc E3exit
+MainCharLoop:call DispNewScreen
+	call RestoreStatusLine
+	call HandleChar
+	cmp byte [endeedit],0
+	je MainCharLoop
+	xor esi,esi			;just like if no arg is present
+	cmp byte [endeedit],2
+	je ReStart			;^KD repeat edit using another file
+E3exit:	call KursorStatusLine
+	mov ecx,text			;enter next line on terminal NEWLINE is @ byte [text]
+	xor edx,edx
+	inc edx				;mov edx,1
+	call WriteFile0
+;-------
+%ifdef BEOS
+	mov ecx,8001h			;TCSETA
+%else	
+%ifdef LINUX
+	mov ecx,5402h			;TCSETS asm/ioctls.h
+%else
+	mov ecx,802c7414h		;TIOCSETA
+%endif
+%endif
+	call IOctlTerminal0		;restore termios settings
+	jmp Exit
+;----------------------------------------------------------------------
+;
+; MAIN function for processing keys
+;
+HandleChar:call ReadChar
+	jz ExtAscii			;DOS version got ah=0 by int 16 for F-keys and cursor keys
+	cmp al,1ch
+	jae NormChar
+	mov bl,al
+	add bl,jumps1
+	jmp short CompJump2
+NormChar:call CheckMode
+	jnz OverWriteChar
+	push eax
+	xor eax,eax
+	inc eax
+	call InsertByte
+	pop eax
+	jc InsWriteEnd			;error: text buffer full
+OverWriteChar:cld
+	stosb
+	mov byte [changed],CHANGED
+InsWriteEnd:ret
+;-------
+;
+; helper for HandleChar
+;
+CtrlKMenu:mov ebx,Ktable
+	mov ecx,20204b5eh		;^K
+	jmp short Menu
+CtrlQMenu:mov ebx,Qtable
+	mov ecx,2020515eh		;^Q
+Menu:	call MakeScanCode
+	jnc EndeRet			;if no valid scancode
+ExtAscii:mov bl,ah			;don't use al (carries char e.g. TAB)
+	sub bl,lowest			;= scan code first key in jumptab1
+	jb EndeRet
+	cmp bl,jumps1
+	jae EndeRet
+CompJump2:mov bh,0
+	lea ebx,[bx]			;1 byte shorter than 'and ebx,0ffh'
+	movzx ebx,word [2*ebx+jumptab1] ;2*ebx is due 2 byte per entry
+	add ebx,_start			;offset inside code
+;-------
+	call ebx			;the general code jump dispatcher
+;-------
+	cmp byte [numeriere],1		;after return from functions...
+	jnz BZNret			;...decide whether count current line number
+	push edi
+	mov esi,sot
+	xchg esi,edi
+	xor edx,edx
+BZNLoop:inc edx				;edx=linenr counter
+	call LookForward
+	inc edi				;point to start of next line
+	cmp edi,esi
+	jbe BZNLoop
+	mov [linenr],edx
+	pop edi
+	mov byte [numeriere],0
+BZNret:	ret
+;-------
+MakeScanCode:call WriteTwo		;ebx expects xlat-table
+	push ebx
+	call GetChar
+	pop ebx
+	and al,01fh
+	cmp al,27
+	jnb EndeRet
+	xlatb
+	mov ah,al			;returns pseudo "scancode"
+EndeRet:ret				;exception: ok=cy here
+;----------------------------------------------------------------------
+;
+; processing special keys: cursor, ins, del
+;
+KeyRet:	call CheckMode
+	jnz  OvrRet
+	call CountToLineBegin		;set esi / returns eax
+	inc esi
+	inc esi
+	or eax,eax
+	jz KeyRetNoIndent
+	xor eax,eax
+	dec eax
+KeyRetSrch:inc eax			;search non (SPACE or TABCHAR)
+	cmp byte [esi+eax],SPACECHAR
+	je KeyRetSrch
+	cmp byte [esi+eax],TABCHAR
+	je KeyRetSrch
+KeyRetNoIndent:
+	push esi
+	push eax			;eax is 0 or =indented chars
+	call GoDown
+	pop eax
+	push eax
+	inc eax				;1 extra for 0ah
+	call InsertByte
+	pop ecx				;# blanks
+	pop esi				;where to copy
+	jc SimpleRet
+	inc dword [linenr]
+	mov al,NEWLINE
+	cld
+	stosb
+	jecxz SimpleRet
+	rep movsb			;copy upper line i.e. SPACES,TABS into next
+SimpleRet:ret
+OvrRet:	xor eax,eax
+	mov [ch2linebeg],eax
+	jmp short DownRet
+;-------
+KeyDown:call CountColToLineBeginVis
+DownRet:call GoDown
+	call LookLineDown
+	jmp short SetColumn
+;-------
+KeyUp:	call GoUp
+	call CountColToLineBeginVis
+	call LookLineUp
+	jmp short SetColumn
+;-------
+KeyPgUp:call CountColToLineBeginVis
+	call LookPageUp
+	jmp short SetColumn
+;-------
+KeyPgDn:call CountColToLineBeginVis
+	call LookPgDown			;1st char last line
+;-------
+SetColumn:mov ecx,[ch2linebeg]		;maximal columns
+	xor edx,edx			;counts visible columns i.e. expand TABs
+	dec edi
+SCloop:	inc edi
+	cmp edx,ecx			;from CountColToLineBeginVis
+	jae SCret
+	cmp byte [edi],NEWLINE		;don't go beyond line earlier line end
+	jz SCret
+	cmp byte [edi],TABCHAR
+	jz SCtab
+	inc edx				;count columns
+	jmp short SCloop
+SCtab:	call SpacesForTab
+	add dl,ah
+	cmp edx,ecx			;this tab to far away right?
+	jna SCloop			;no
+SCret:	ret
+;-------
+KeyHome:call CountToLineBegin
+	sub edi,eax
+	ret
+;-------
+KeyEnd:	call CountToLineEnd
+	add edi,eax			;points to a 0ah char
+	ret
+;-------
+KeyIns:	not byte [insstat]
+	ret
+;-------
+KeyDell:call KeyLeft
+	jz KeyDell2
+KeyDel:	cmp edi,ebp
+	jnb KeyLeftEnd
+	xor eax,eax			;delete one @ cursor
+	inc eax
+	jmp DeleteByte
+KeyDell2:cmp edi, sot			;delete newline char
+	jbe KeyLeftEnd
+	dec dword [linenr]
+	dec edi
+	jmp KeyCtrlT1
+;-------
+KeyLeft:cmp byte [edi-1],NEWLINE	;FIXME another check of BOF
+	jz KeyLeftEnd			;jmp if at BOL
+	dec edi
+KeyLeftEnd:ret
+;-------
+KeyRight:cmp byte [edi],NEWLINE
+	jz KeyRightEnd			;at right margin
+	inc edi
+KeyRightEnd:ret
+;-------
+KeyCLeft3:cmp edi, sot
+	jbe KeyCLEnd
+	dec edi
+KeyCtrlLeft:call KeyLeft
+	jz KeyCLeft3
+	cmp byte [edi],2fh
+	jbe KeyCtrlLeft
+	cmp byte [edi-1],2fh
+	ja KeyCtrlLeft
+KeyCLEnd:ret
+;-------
+KeyCRight3:call CheckEof
+	jae KeyCREnd
+	inc edi
+KeyCtrlRight:call KeyRight
+	jz KeyCRight3
+	cmp byte [edi],2fh
+	jbe KeyCtrlRight
+	cmp byte [edi-1],2fh
+	ja KeyCtrlRight
+KeyCREnd:ret
+;----------------------------------------------------------------------
+;
+; processing special keys from the Ctrl-Q menu
+;
+KeyCtrlQE:call LookPgBegin		;goto top left on screen
+	call KursorFirstLine
+	jmp short CQFNum
+;-------
+KeyCtrlQX:call LookPgEnd		;1st goto last line on screen
+	call KeyEnd			;2nd goto line end
+	call KursorLastLine
+	jmp short CQFNum
+;-------
+KeyCtrlQV:cmp byte [bereitsges],0	;goto last ^QA,^QF pos
+	jz CtrlQFEnd
+	mov edi,[oldQFpos]
+	jmp short CQFNum
+;-------
+KeyCtrlQA:mov byte [bereitsges],2
+	call AskForReplace
+	jc CtrlQFEnd
+CQACtrlL:push edi
+	call FindText
+	jc CtrlQFNotFound
+	mov eax,[suchlaenge]
+	call DeleteByte
+	mov eax,[repllaenge]
+	call InsertByte
+	mov esi,replacetext
+	call MoveBlock
+	jmp short CQFFound
+;-------
+KeyCtrlQF:mov byte [bereitsges],1
+	call AskForFind
+	jc CtrlQFEnd
+CQFCtrlL:push edi
+	call FindText
+	jc CtrlQFNotFound
+CQFFound:mov [oldQFpos],edi
+	pop esi				;dummy
+CQFNum:	mov byte [numeriere],1
+	ret
+CtrlQFNotFound:pop edi
+CtrlQFEnd:ret
+;-------
+KeyCtrlQC:mov edi,ebp
+	jmp short CQFNum
+;-------
+KeyCtrlQR:mov edi,sot
+	jmp short CQFNum
+;-------
+KeyCtrlQP:mov edi,[veryold]
+	jmp short CQFNum	
+;-------
+KeyCtrlL:mov al,[bereitsges]		;2^QA   1^QF   0else
+	dec al
+	jz CQFCtrlL
+	dec al
+	jz CQACtrlL
+SimpleRet4:ret
+;-------
+KeyCtrlQB:xchg eax,edi
+	mov edi,[blockbegin]
+CtrlQB2:or edi,edi			;exit of no marker set
+	jnz CQFNum
+	xchg edi,eax
+	ret
+;-------
+KeyCtrlQK:xchg eax,edi
+	mov edi,[blockende]
+	jmp short CtrlQB2
+;-------
+KeyCtrlQI:call GetAsciiToInteger
+	jc SimpleRet4
+	mov edi,sot
+	call LookPD2
+JmpCQFN:jmp short CQFNum
+;-------
+KeyCtrlQDel:call KeyLeft		;delete all left of cursor
+	call CountToLineBegin
+	sub edi,eax
+	call DeleteByteCheckMarker
+	jmp short KeyCtrlT1
+;-------
+KeyCtrlQY:call CountToLineEnd
+	jmp short CtrlTEnd1
+;-------
+KeyCtrlY:call CountToLineBegin
+	sub edi,eax        		;edi at begin
+	call CountToLineEnd
+	call DeleteByteCheckMarker
+	jmp short KeyCtrlT1
+;-------
+KeyCtrlT:call CountToWordBegin
+	cmp byte [edi],NEWLINE
+	jnz CtrlTEnd1
+KeyCtrlT1:call CheckEof   
+	jz SimpleRet4
+	xor eax,eax
+	inc eax				;1 for 0ah
+CtrlTEnd1:jmp DeleteByteCheckMarker
+;----------------------------------------------------------------------
+;
+; processing special Keys from Ctrl-K menu
+;
+KeyCtrlKY:call CheckBlock
+	jc SimpleRet3			;no block: no action
+	mov eax,[blockende]
+	mov edi,esi			;esi is blockbegin (side effect in CheckBlock)
+	sub eax,esi			;block length
+	call DeleteByte			;out ecx:=0
+	mov [blockende],ecx		;i.e. NO block valid now
+	mov [blockbegin],ecx
+	jmp short JmpCQFN
+;-------
+KeyCtrlKH:xor byte [showblock],1 	;flip flop
+SimpleRet3:ret
+;-------
+KeyCtrlKK:mov [blockende],edi
+	jmp short KCKB
+;-------
+KeyCtrlKW:call CheckBlock
+	jc SimpleRet2   ;no action
+	call SaveBlock
+	jmp short CtrlKREnd
+;-------
+KeyCtrlKC:call CopyBlock
+	jc SimpleRet2
+CtrlKC2:mov [blockbegin],edi
+	add eax,edi
+	mov [blockende],eax
+	ret
+;-------
+KeyCtrlKV:call CopyBlock
+	jc SimpleRet2
+	push edi
+	cmp edi,[blockbegin]
+	pushf
+	mov edi,[blockbegin]
+	call DeleteByte
+	neg eax				;(for optimizing eax is negated there)
+	popf
+	pop edi
+	jb CtrlKC2
+	mov [blockende],edi
+	sub edi,eax
+KeyCtrlKB:mov [blockbegin],edi
+KCKB:	mov byte [showblock],1
+SimpleRet2:ret
+;-------
+KeyCtrlKR:call ReadBlock
+	jc CtrlKREnd
+	call KeyCtrlKB
+	add ecx,edi
+	mov [blockende],ecx
+CtrlKREnd:jmp RestKursPos
+;-------
+KeyCtrlKS:call SaveFile
+	pushf				;(called by ^kd)
+	call RestKursPos
+	popf
+	jc CtrlKSEnd
+	mov byte [changed],UNCHANGED
+CtrlKSEnd:ret
+;-------
+KeyCtrlKQ:cmp byte [changed],UNCHANGED
+	jz KCKXend
+	mov esi,asksave
+	call DE1
+	call RestKursPos
+	and al,0dfh
+	cmp al,'Y'
+	jnz KCKXend			;Y for request SAVE changes
+KeyCtrlKX:call KeyCtrlKS
+	jc CtrlKSEnd
+KCKXend:inc byte [endeedit]
+KeyKXend:ret	
+KeyCtrlKD:call KeyCtrlKS
+	jc CtrlKSEnd
+	mov byte [endeedit],2
+	ret
+;---------------------------------------------------------------------
+;
+; the general PAGE DISPLAY function: called after any pressed key
+;
+; side effect: sets 'columne' for RestoreStatusLine function (displays columne)
+; variable kurspos: for placing the cursor at new position
+; register bh counts lines
+; register bl counts columns visible on screen (w/o left scrolled)
+; register edx counts columns in text lines
+; register ecx screen line counter and helper for rep stos
+; register esi text index
+; register edi screen line buffer index
+;
+DispNewScreen:
+	call GetEditScreenSize	;check changed tty size
+	xor eax,eax
+	mov byte[isbold],al
+	mov byte[inverse],al
+	mov [zloffst],eax
+	mov [columne],eax
+	mov [fileptr],edi		;for seeking current cursor pos
+	call CountColToLineBeginVis	;i.e. expanding TABs
+	mov ebx,[columns]
+	cmp eax,ebx
+	jb DispShortLine
+	sub eax,ebx
+	inc eax
+	mov [zloffst],eax
+DispShortLine:call LookPgBegin 		;go on 1st char upper left on screen
+	mov esi,edi			;esi for reading chars from text
+	mov ecx,[lines]
+	jecxz KeyKXend			;window appears too small
+	cld
+	mov bh,0			;first line
+	dec bh
+DispNewLine:inc bh			;new line
+	mov edi,screenline		;line display buffer
+	xor edx,edx			;reset char counter
+	mov bl,0 			;reset screen column to 0
+%ifdef LESSWRITEOPS
+	call SetColor2			;set initial character color per each line
+%endif	
+DispCharLoop:
+	cmp esi,[fileptr]		;display char @ cursor postion ?
+	jnz DispCharL1
+	cmp byte[tabcnt],0
+	jnz DispCharL1
+	mov [kurspos],ebx
+	mov byte [columne],bl
+	mov eax,[zloffst]		;chars scrolled left hidden
+	add [columne],eax
+%ifdef CURSORMGNT
+	stc
+	call SetInverseStatus
+	jnc DispEndLine
+%endif	
+DispCharL1:call SetColor		;set color if neccessary
+;-------
+DispEndLine:cmp esi,ebp
+	ja FillLine			;we have passed EOF, so now fill rest of screen
+	cmp byte[tabcnt],0
+	jz ELZ
+	dec byte[tabcnt]
+	jmp short ELZ2
+ELZ:	cmp esi,ebp
+	jnz ELZ6
+	inc esi				;set esi>ebp will later trigger  "ja FillLine"
+	jmp short ELZ2	
+ELZ6:	lodsb
+	cmp al,TABCHAR
+	jnz ELZ3
+	call SpacesForTab		;ah = space_up_to_next_tab location
+	dec ah				;count out the tab char itself
+	mov byte[tabcnt],ah
+ELZ2:	mov al,SPACECHAR
+ELZ3:	cmp al,NEWLINE
+	jz FillLine
+	cmp al,SPACECHAR
+	jae ELZ9			;simply ignore chars like carriage_return etc.
+	mov al,'.'
+ELZ9:	cmp al,7fh
+	jne ELZ8
+	mov al,'.'
+ELZ8:	cmp bl,byte [columns]		;screen width
+	jae DispEndLine			;continue reading line until end
+	inc edx				;also count hidden chars (left margin)
+	cmp edx,[zloffst]
+	jbe ELZ5			;load new char (but no display)
+	stosB
+%ifdef CURSORMGNT
+	clc
+	call SetInverseStatus
+%endif	
+	inc bl				;counts displayed chars only
+ELZ5:	jmp DispCharLoop
+;-------
+FillLine:push ecx			;continue rest of line
+	mov ecx,[columns]		;width
+	sub cl,bl
+	mov al,SPACECHAR		;fill with blanks
+	jecxz FillLine2
+	cmp byte[inverse],1		;special cursor attribute?
+	jnz FillLine1
+	stosB				;only 1st char with special attribute
+%ifdef CURSORMGNT
+	clc
+	call SetInverseStatus
+%endif
+	dec ecx				;one char less
+	jz FillLine2
+FillLine1:rep stosB			;store the rest blanks
+FillLine2:pop ecx
+	mov byte[edi],0
+	call ScreenLineShow
+	dec ecx
+	jnz near DispNewLine
+	mov edi,[fileptr]		;restore text pointer
+	jmp RestKursPos
+;----------------------------------------------------------------------
+; three helper subroutines called by DispNewScreen 
+; dealing ESC sequences for character attributes
+;
+%ifdef LESSWRITEOPS_OR_CURSORMGNT
+SetInverseStatus:push ecx		;returns zero flag
+	push esi
+	mov ecx,boldlen
+	jnc SIS1
+	cmp byte [insstat],1
+	stc
+	jnz SIS4
+	mov byte[inverse],1
+	mov esi,reversevideoX
+	add esi,[revvoff]		;switch between esc seq for linux or Xterm
+	jmp short SIS2
+SIS1:	cmp byte[inverse],1
+	jnz SIS3
+	mov byte[inverse],0
+SIS6:	mov byte[isbold],0
+SIS5:	mov esi,bold0
+SIS2:	rep movsb
+SIS3:	clc
+SIS4:	pop esi
+	pop ecx
+	ret
+%endif
+;-------
+SetColor:push ecx			;expects cy flag:bold /  nc:normal
+	push esi
+	call IsShowBlock
+	jnc SCEsc1
+	cmp byte [isbold],1		;never set bold if it is already bold
+	jz SIS4
+	mov byte [isbold],1
+SCEsc2:	mov esi,bold1
+	jmp short SIS2
+SCEsc1:	cmp byte [isbold],0		;ditto
+	jz SIS4
+	jmp short SIS6
+;-------
+%ifdef LESSWRITEOPS
+SetColor2:push ecx
+	push esi
+	call IsShowBlock
+	jnc SIS5
+	jmp short SCEsc2
+%endif
+;
+;-------
+; a little helper for SetColor* functions
+;
+IsShowBlock:cmp byte [showblock],0
+	je SBlock
+	cmp dword [blockbegin],0
+	je SBlock
+	cmp [blockbegin],esi
+	ja SBlock
+	cmp esi,[blockende]
+	jb SB_ret
+SBlock:	clc
+SB_ret:	push byte boldlen
+	pop ecx
+	ret
+;-------
+; this helper for DispNewScreen checks screen size before writing on screen
+; FIXME: adjusting edit screen resize works with xterm, but not with SVGATextMode
+;
+GetEditScreenSize:
+%ifdef BEOS
+	mov ecx,800Ch			;TCGETA+13
+%else
+%ifdef LINUX
+	mov ecx,5413h			;asm/ioctls.h:	#define TIOCGWINSZ 0x5413
+%else
+	mov ecx,40087468h
+%endif
+%endif
+	mov edx,winsize
+	call IOctlTerminal
+	mov eax,[edx]			;each 16 bit lines,columns
+ 	or eax,eax
+ 	jnz noerr
+ 	mov eax,0x00500018		;i.e. (80<<16)+24  (assume 80x24)
+noerr:	dec al				;without status line
+	mov byte [lines],al
+	shr eax,16
+	mov byte [columns],al		;columns > 255 are ignored...
+	ret
+;----------------------------------------------------------------------
+;
+; LOWER LEVEL screen acces function (main +2 helpers)
+; this function does write the line buffer to screen i.e. terminal
+;
+; at first 2 special entry points:
+WriteTwo:mov [screenline],ecx
+StatusLineShow:xor ecx,ecx		;0 for last line
+;
+ScreenLineShow:pusha			;expecting in ecx screen line counted from 0
+%ifdef LESSWRITEOPS
+	mov eax,[columns]
+	add eax,32			;estimated max ESC sequences extra bytes (i.e. boldlen*X)
+	mul ecx				;setting edx to 0
+	mov ebx,edx			;flag
+	lea edi,[eax+screenbuffer]
+%else
+	xor edx,edx	
+%endif	
+	cld
+	mov esi,screenline
+sl3:	lodsb
+	inc edx				;count message length to write
+%ifdef LESSWRITEOPS
+	cmp edi,screenbuffer_end	;never read/write beyond buffer
+	jnb sl5
+	cmp al,[edi]
+	jz sl4
+	mov [edi],al
+sl5:	inc ebx				;set flag whether line need redrawing
+sl4:	inc edi
+%endif
+	or al,al
+	jnz sl3
+	dec edx				;one too much
+%ifdef LESSWRITEOPS
+	or ebx,ebx			;redraw ?
+	jz NoWrite			;..no: quick exit
+%endif
+	push edx
+	xor edx,edx
+	mov dh,byte [lines]
+	sub dh,cl
+	call sys_writeKP		;set cursor pos before writing the line
+	pop edx	
+	push ecx
+	mov eax,screencolors1		;set bold yellow on blue
+	call sys_writeSLColors		;special for status line (ecx==0)
+	mov ecx,screenline		;second argument: pointer to message to write
+	call WriteFile0
+	pop ecx
+	mov eax,screencolors0		;reset to b/w
+	call sys_writeSLColors		;special for status line (ecx==0)
+	mov edx,[kurspos2]
+	call sys_writeKP		;restore old cursor pos
+NoWrite:popa
+	ret
+;-------
+; a helper for ScreenLineShow
+;
+sys_writeSLColors:
+	jecxz syswSL			;do nothing if not in status line
+	ret
+syswSL:	pusha
+	xchg eax,ecx			;parameter points to ESC-xxx color string
+	mov edx,scolorslen
+	call WriteFile0
+	popa
+	ret	
+;----------------------------------------------------------------------
+;
+; getting line INPUT from terminal / UNDER CONSTRUCTION
+;
+; expecting pointer to message text in esi
+;
+InputStringWithMessage:
+	call WriteMess9MakeLine
+	mov ecx,optbuffer
+	push byte optslen
+	pop edx
+	jmp short InputString
+InputString0:call WriteMess9MakeLine
+	mov edx,maxfilenamelen
+;
+; expecting input line buffer in ecx
+; expecting max count byte in edx
+; return length in eax, CY for empty string (or abort via ^U)
+;
+InputString:push ecx
+	push edi
+	push dword [kurspos2]
+	mov ebx,[columns]
+	sub ebx,stdtxtlen
+	cmp edx,ebx			;TODO enable some scrolling:
+	jb IS8				;not yet ready, so truncate at end of line
+	mov edx,ebx
+IS8:	xor ebx,ebx
+;;;;	mov [bufptr],ecx
+	mov edi,ecx
+IS0:	push ebx
+	push edx
+	mov byte [kurspos2],bl		;colum
+	add byte [kurspos2],stdtxtlen	;offset
+	mov bl,byte[lines]		;line#
+	mov byte [kurspos2+1],bl
+%ifdef LESSWRITEOPS	
+	mov byte [screenbuffer],0	;switching off usage of buffer v0.7
+%endif	
+	call StatusLineShow
+	call GetChar
+	pop edx
+	pop ebx
+	cld
+	cmp al,15h			;^U abort (WStar)
+	jne IS9
+	xor ebx,ebx			;length 0 triggers CY flag
+	jmp short IS1
+IS9:	cmp al,NEWLINE
+	je IS1
+	cmp al,8			;^H (translated DEL)
+	jne IS2
+	or ebx,ebx			;@left border?
+	jz IS0
+	dec ebx
+	dec edi
+	mov al,SPACECHAR
+	mov byte [ebx+screenline+stdtxtlen],al
+	jmp short IS0
+;-------
+IS2:	cmp al,SPACECHAR
+	jb IS0
+	stosb
+	mov byte [ebx+screenline+stdtxtlen],al		;ditto
+	inc ebx
+	cmp ebx,edx
+	jb IS0
+;-------
+IS1:	mov al,0
+	stosb				;make asciz string
+	pop dword [kurspos2]
+	pop edi
+	pop ecx
+	xchg eax,ebx
+	cmp al,1			;set cy flag if empty string (len always <256)
+	ret
+;----------
+;
+; GetChar returns ZERO flag for non ASCII (checked in HandleChar)
+;
+ReadChar:mov eax,edi
+	xchg eax,[old] 			;for ^QP
+	mov [veryold],eax
+GetChar:call ReadOneChar
+	cmp al,7FH
+	jne RC_No7F			;special case: remap DEL to Ctrl-H
+	mov al,8
+RC_No7F:cmp al,27 			;ESC ?
+	jnz near RCready_2
+	call ReadOneChar		;dont care whether '[' or 'O' (should be) or any else
+	call ReadOneChar		;e.g.  [ for vt220,rxvt family  O for xterm,vt100 family
+	mov bl,47h			;47h home - the lowest
+	cmp al,'1'
+	jz RC_Tilde
+	cmp al,'7'			;(on rxvt only)
+	jz RC_Tilde
+	cmp al,'H'
+	jz RCready			;(on xterm only)
+	inc bl				;48h up
+	cmp al,'A'
+	jz RCready
+	inc bl				;49h PgUp
+	cmp al,'5'
+	jz RC_Tilde
+%ifndef LINUX
+	cmp al,'I'
+	jz RCready
+%endif	
+	inc bl
+	inc bl				;4Bh left
+	cmp al,'D'		
+	jz RCready
+	inc bl
+	inc bl				;4Dh right
+	cmp al,'C'
+	jz RCready
+	inc bl
+	inc bl				;4Fh end
+	cmp al,'4'
+	jz RC_Tilde
+	cmp al,'8'			;(on rxvt only)
+	jz RC_Tilde
+	cmp al,'F'			;(on xterm only)
+	jz RCready
+	inc bl				;50h down
+	cmp al,'B'
+	jz RCready
+	inc bl				;51h PgDn
+	cmp al,'6'
+	jz RC_Tilde
+%ifndef LINUX
+	cmp al,'G'
+	jz RCready
+%endif		
+	inc bl				;52h insert
+	cmp al,'2'
+	jz RC_Tilde
+%ifndef LINUX
+	cmp al,'L'
+	jz RCready
+%endif		
+	inc bl				;53h del
+	cmp al,'3'
+	jnz short RCready_2		;slightly ignore this chars
+RC_Tilde:push ebx
+	call ReadOneChar		;read another ~ (after integer 1..8)
+	pop ebx
+	cmp al,'~'
+	jnz near GetChar		;could be F7,sF2 etc on linuxterm: ignored
+;-------
+RCready:xor eax,eax
+	mov ah,bl
+RCready_2:or al,al			;was similar in old DOS version (via BIOS int 16h)
+	ret
+;-------
+SetTermStruc:
+%ifdef BEOS
+	mov ecx,8000h			;TCGETA
+%else
+%ifdef LINUX
+	mov ecx,5401h			;TCGETS asm/ioctls.h
+%else
+	mov ecx,402c7413h		;TIOCGETA
+%endif
+%endif
+	mov edx,orig
+	call IOctlTerminal0
+	mov esi,edx
+	mov edi,termios
+	mov edx,edi
+	push byte termios_size		;prepare a copy of original settings
+	pop ecx
+	cld
+	rep movsb
+;-------
+%ifdef BEOS
+	and byte [edx+12],(~2 & ~1 & ~8);icanon off, isig (^C) off, echo off
+	and byte [edx+ 1],(~4)		;ixon off  	was: and word [edx+ 0],(~400h)
+	mov ecx,8001h			;TCSETA	
+%else
+%ifdef LINUX
+	and byte [edx+12],(~2 & ~1 & ~8);icanon off, isig (^C) off, echo off
+	and byte [edx+ 1],(~4)		;ixon off  	was: and word [edx+ 0],(~400h)
+	mov byte [edx+23],1		;set min=1 ->needed for gnome-terminal
+	mov ecx,5402h			;TCSETS asm/ioctls.h
+%else
+	and word [edx+12],(~100h & ~80h & ~8h)	;icanon off, isig (^C) off, echo off
+	and word [edx+ 0],(~200h)
+	mov ecx,802c7414h		;TIOCSETA
+%endif
+%endif
+	call IOctlTerminal		;edx is termios pointer	
+	ret
+;-------
+; called by ReadChar/GetChar
+;
+ReadOneChar:mov ecx,read_b		;pointer to buf
+	xor edx,edx
+	inc edx				;mov edx,1  (length)
+	call ReadFile0
+	mov eax,[ecx]			;[read_b]
+	ret
+;----------------------------------------------------------------------
+;
+; L O O K functions
+; search special text locations and set register edi to
+;
+LookBackward:				;set EDI to 1 before EOL (0Ah) i.e., 2 before start of next line
+	push ecx	
+	push ebx
+	xor ebx,ebx
+	cmp byte[edi-1],NEWLINE		;at BOL ?
+	jz LBa3
+	cmp byte[edi],NEWLINE		;at EOL ?
+	jnz LBa1
+	dec edi				;at EOL ? start search 1 char earlier
+	inc ebx				;increase counter
+LBa1:	mov ecx,99999
+	mov al,NEWLINE
+	std
+	repne scasb
+	lea eax,[ebx+99997]		;mov eax,99997 / add eax,ebx
+	sub eax,ecx
+LBa5:	pop ebx
+	pop ecx
+	jmp short CheckBof
+;-------
+LBa3:	xor eax,eax
+	dec edi
+	dec edi
+	jmp short LBa5
+;-------
+LookForward:push ecx			;don't touch edx (if called by BZNLoop only)
+	mov ecx,99999
+	mov al,NEWLINE
+	cld
+	repne scasb
+	mov eax,99998
+	sub eax,ecx
+	pop ecx
+	dec edi
+CheckEof:cmp edi,ebp			;ptr is eof-ptr?      
+	jnz CheckEnd			;Z flag if eof             
+	jmp short CheckENum
+CheckBof:cmp edi, sot-1
+	ja CheckEnd
+CheckENum:mov byte [numeriere],1	;if bof
+CheckEnd:ret
+;-------
+LookPgBegin:mov edx,[kurspos2]		;called by DispNewScreen to get sync with 1st char on screen
+	xor ecx,ecx
+	mov cl,dh			;called by KeyCtrlQE  (go upper left)
+	inc cl
+	jmp short LookPU2
+;-------
+LookPgEnd:mov edx,[kurspos2]		;goes 1st char last line on screen
+	mov ecx,[lines]
+	sub cl,dh
+        jmp short LookPD2
+;-------
+LookLineUp:push byte 2			;2 lines: THIS line and line BEFORE
+	pop ecx
+	dec dword [linenr]
+	jmp short LookPU2
+;-------
+LookLineDown:push byte 2		;2 lines: THIS and NEXT line
+	pop ecx
+	inc dword [linenr]
+	jmp short LookPD2
+;-------
+LookPageUp:mov ecx,[lines]
+	dec ecx				;PgUp,PgDown one line less
+	sub [linenr],ecx 
+	inc ecx
+LookPU2:call LookBackward
+	jb LookPUEnd			;if BOF
+	inc edi
+	loop LookPU2			;after loop edi points to char left of 0ah
+	dec edi
+LookPUEnd:inc edi   
+	inc edi				;now points to 1st char on screen or line
+	ret
+;-------
+LookPgDown:mov ecx,[lines]
+	dec ecx				;PgUp,PgDown one line less
+	add [linenr],ecx
+	inc ecx
+LookPD2:call LookForward
+	jz LookPDEnd			;(jmp if EOF)
+	inc edi				;1st char next line
+	loop LookPD2
+	dec edi				;last char last line
+LookPDEnd:sub edi,eax			;1st char last line
+	ret
+;----------------------------------------------------------------------
+;
+; some more CHECK functions
+;
+CheckBlock:cmp byte [showblock],1	;returns CY if error else ok: NC
+	jc CheckBlockEnd
+	mov esi,[blockende]
+	cmp esi, sot
+	jb CheckBlockEnd
+	mov esi,[blockbegin]		;side effect esi points to block begin
+	cmp esi, sot
+	jb CheckBlockEnd
+	cmp [blockende],esi     	;^KK > ^KB ..OK if above!
+CheckBlockEnd:ret
+;-------
+CheckImBlock:cmp [blockbegin],edi	;^KB mark > edi ?
+	ja CImBlockEnd			;OK
+	cmp edi,[blockende]		;edi > ^KK
+CImBlockEnd:ret	          		;output:cy fehler / nc ok inside block
+;-------
+CheckMode:cmp byte [edi],NEWLINE	;checks for INSERT status
+	jz ChModeEnd
+	cmp byte [insstat],1
+ChModeEnd:ret				;Z flag for ins-mode
+;-------
+; a special case called by DeleteByteCheckMarker
+;
+CheckMarker:				;edx is blockbegin (^KB) 
+					;ebx is deleate area end --- edi delete area start
+	cmp edi,edx			;delete area start < ^KB marker ?
+	ja CMEnd			;no
+	cmp ebx,edx			;yes, but delete area end > ^KB ?
+	jl CMEnd			;no
+	mov edx,edi			;yes so block start (^KB) to delete area start
+CMEnd:	ret
+;----------------------------------------------------------------------
+;
+; C O U N T  functions
+; to return number of chars up to some place
+; (all of them are wrappers of Look....functions anyway)
+;
+CountToLineEnd:push edi
+	call LookForward
+	pop edi
+	ret				;eax=chars up to line end
+;-------
+CountColToLineBeginVis:			;counts columns represented by chars in EAX
+	call CountToLineBegin		;i.e. EXPAND any TAB chars found
+	push esi
+	xor edx,edx
+	mov esi,edi			;startpoint	
+	sub esi,eax			;to bol
+	dec esi
+CCV1:	inc esi
+	cmp esi,edi
+	jae CCVend
+	cmp byte [esi],TABCHAR
+	jz CCVTab
+	inc edx				;count visible chars
+	jmp short CCV1
+CCVTab:	call SpacesForTab		;return space_up_to_next_tab in ah
+	add dl,ah			;FIXME: now using 8 bits only
+	jmp short CCV1
+CCVend: mov [ch2linebeg],edx		;ch2linebeg: interface to Key... functions
+	mov eax,edx			;eax: interface to DispNewScreen
+	pop esi
+	ret
+;-------
+CountToLineBegin:push edi		;output eax=chars up there
+	call LookBackward
+	mov esi,edi			;side effect: set edi to 1st char in line
+	pop edi
+	ret
+;-------
+CountToWordBegin:			;output eax=chars up there
+	mov esi,edi
+CountNLoop:inc esi
+	cmp byte [esi],NEWLINE
+	jz CTWend
+	cmp byte [esi],SPACECHAR	;below SPACE includes tab chars
+	jbe CountNLoop
+	cmp byte [esi-1],2fh
+	ja CountNLoop 
+CTWend:	mov eax,esi
+	sub eax,edi			;maybe =0
+	ret
+;---------------------------------------------------------------------
+;
+; some CURSOR control functions
+;
+GoUp:	mov al,0
+	mov ah,-1
+	jmp short UpDown
+GoDown:	mov al,byte [lines]
+	dec al
+	mov ah,1
+UpDown:	mov edx,[kurspos2]		;former was call getkurspos
+	cmp dh,al
+	jz Goret
+	add dh,ah			;ONLY here we change curent line of cursor
+	jmp short SetKursPos 
+Goret:	ret       
+;-------
+; set cursor to some desired places
+;
+KursorFirstLine:xor edx,edx
+	jmp short SetKursPos
+KursorLastLine:mov dh,byte [lines]
+	dec dh
+	mov dl,0
+	jmp short SetKursPos
+KursorStatusLine:mov dh,byte [lines]
+	mov dl,stdtxtlen
+	jmp short SetKursPos
+RestKursPos:mov edx,[kurspos]
+SetKursPos:mov [kurspos2],edx      	;saves reading cursor pos   (0,0)
+sys_writeKP:pusha			;(old was: mov ah,2/mov bh,0/int 10h)
+	call make_KPstr
+	mov ecx,setkp 			;second argument: pointer to message to write
+	push byte setkplen		;third argument: message length
+	pop edx
+	call WriteFile0
+	popa
+	ret
+;-------
+; make ESC sequence appropriate to most important terminals
+;
+make_KPstr:inc dl			;expecting cursor pos in dh/dl (0,0)
+	inc dh 				;both line (dh) col (dl) are counted now from 1
+	cld
+	mov edi,setkp			;build cursor control esc string db 27,'[000;000H'
+	mov al,1Bh
+	stosb				;init memory
+	mov eax,'[000'
+	stosd
+	mov al,';'			;i.e. load eax with ';000'
+	stosd
+	mov al,'H'
+	stosb
+	mov edi,setkp+1+3		;line end
+	xor eax,eax
+	mov al,dh			;DH=line
+	push edx
+	call IntegerToAscii		;make number string
+	pop edx
+	mov edi,setkp+1+3+4		;column end
+	xor eax,eax
+	mov al,dl			;DL=col
+;-------continued...
+; a general helper
+;   expects integer# in eax
+IntegerToAscii:
+	push byte 10
+	pop ecx
+	std
+	xchg eax,ebx			;ebx helper (xchg eax,.. is only 1 byte!)
+Connum1:xchg eax,ebx
+	cdq
+	div ecx
+	xchg eax,ebx			;save quotient (new low word)
+	mov al,dl
+	and al,0fh
+	add al,'0'	
+	stosb	
+	or ebx,ebx
+	jne Connum1
+	cld
+	ret
+;----------------------------------------------------------------------
+;
+; functions for INSERTING, COPYING and DELETING chars in text
+;
+InsertByte:or eax,eax			;input: eax = # of bytes  edi = ptr where
+	jz Ins3
+	mov ecx,[maxlen]		;max_len+offset-eofptr=freespace(ecx)
+	add ecx,sot
+	sub ecx,ebp
+	cmp ecx,eax			;cmp freespace - newbytes  ;>= 0 ok/ NC  <0 bad / CY
+	jnc SpaceAva
+	push byte 105
+	pop dword [errno]		;(mov dword[errno],105 has 2 byte extra)
+	call OSerror
+	call RestKursPos
+	stc
+	ret
+SpaceAva:push edi
+	mov esi,ebp			;end of text movsb-source
+	lea ecx,[ebp+1]
+	sub ecx,edi			;space count: distance between eof and current position
+	lea edi,[ebp+eax]		;movsb-destination
+	std
+	rep movsB
+Ins0:	pop edi				;here is the jmp destination from DeleteByte
+;-------
+	mov byte [changed],CHANGED
+	add ebp,eax
+	cmp edi,[blockende]
+	jae Ins1
+	add [blockende],eax
+Ins1:	cmp edi,[blockbegin]
+	jae Ins2
+        add [blockbegin],eax
+Ins2:	clc
+Ins3:	ret				;output:nc=ok/cy=bad /ecx=0/ eax inserted / -eax deleted
+;-------
+DeleteByteCheckMarker:			;edi points to begin
+	lea ebx,[edi+eax]		;ebx points to end
+	mov edx,[blockbegin]
+	call CheckMarker
+	mov [blockbegin],edx
+	mov edx,[blockende]
+	call CheckMarker
+	mov [blockende],edx
+DeleteByte:or eax,eax			;input in eax
+	jz MoveBlEnd
+	push edi
+	mov ecx,ebp			;end
+	sub ecx,edi
+	lea esi,[edi+eax]		;current + x chars
+	sub ecx,eax
+	lea ecx,[ecx+3]			;add ecx,3  needs 3 byte more!
+	shr ecx,1
+	cld
+	rep movsW
+	neg eax				;"neg eax" is for continuing @InsertByte
+	jmp short Ins0			;pending "pop edi"
+;-------
+CopyBlock:call CheckBlock		;copy block, called by ^KC, ^KV
+	jc MoveBlEnd
+	call CheckImBlock
+	jc MoveBlEnd
+	mov eax,[blockende]
+	sub eax,esi			;block len
+	call InsertByte
+	jc MoveBlEnd
+	mov esi,[blockbegin]
+MoveBlock:push edi			;input : esi=^KB edi=current
+	mov ecx,eax			;don't use xchg here
+	cld
+	rep movsb
+	pop edi
+	clc				;nocarry->ok
+MoveBlEnd:ret				;return eax=size
+;----------------------------------------------------------------------
+;
+; functions reading/writing  text or blocks  from/into  files
+;
+NewFile:call InitVars
+	or esi,esi
+	jz NFnoarg
+	cld
+	mov edi,filepath
+NF1:	lodsb
+	stosb
+	or al,al
+	jnz NF1
+	jmp short GetFile
+NFnoarg:
+%ifdef BEOS
+	xor ebx,ebx
+	mov edx,ebx
+	dec ebx				;edx==0,ebx==-1
+	mov ecx,helpfile
+%else
+	mov ebx,helpfile		;load file with some help text (one page)
+%endif
+	call OpenFile0
+	mov edi,sot
+	mov ebp,edi
+	js GF0
+	xchg ebx,eax			;mov ebx,eax is 2 byte
+	call OldFile1			;Fixed in #67
+GF0:	call DispNewScreen		;if not available: clear screen only
+;-------
+	mov esi, filename
+	mov ecx, filepath
+	call InputString0
+	jc NFEnd2			;empty string not allowed here
+;-------
+GetFile:
+%ifdef BEOS
+	xor ebx,ebx
+	mov edx,ebx
+	dec ebx				;edx==0,ebx==-1
+	mov ecx,filepath
+%else
+	mov ebx,filepath
+%endif
+	call OpenFile0
+	mov edi,sot
+	mov ebp,edi
+	js NewFileEnd
+%ifdef LINUX
+	call Seek
+	pusha
+	lea ebx,[eax+eax+102400]	;twice filesize plus reserve = space for inserts
+	mov [maxlen],ebx
+	add ebx,text
+	call SysBrk
+	popa
+	js OSejmp1			;OSerror
+%else
+	mov ebx,eax			;for FreeBSD memory is hard coded by maxlen
+%endif
+;-------
+	call Fstat
+	js OSejmp1			;OSerror
+	mov eax,[fstatbuf+8]		;FIXME: define structure
+	and eax,777q
+	mov [perms],eax
+%ifdef LINUX	
+	mov eax,[fstatbuf+12]		;FIXME: define structure
+	mov [giduid],eax
+%else
+%ifndef BEOS
+	mov eax,[fstatbuf+12]
+	mov [uid],eax
+	mov eax,[fstatbuf+16]
+	mov [gid],eax
+%endif
+%endif	
+OldFile1:mov edx,[maxlen]		;i.e. either 'max' or filesize twice
+	mov ecx,edi			;sot
+	call ReadFile
+	xchg edx,eax			;mov edx,eax	bytes read
+	js OSejmp0			;OSerror
+	call CloseFile
+OSejmp1:js OSejmp0			;OSerror
+	lea ebp,[edx+sot]		;eof_ptr=filesize+start_of_text
+NewFileEnd:mov byte [ebp],NEWLINE	;eof-marker
+	clc
+NFEnd2:	ret
+;-------
+;  save file (called by ^KS,^KX)
+;
+SaveFile:cmp byte [changed],UNCHANGED
+	jz NFEnd2		;SaveFile3			;no changes: nothing to save
+	mov esi, filesave
+	call WriteMess9
+;-------
+	mov esi,filepath
+	push edi
+	mov edi,bakpath
+	mov ebx,esi	
+	mov ecx,edi
+	cld
+SF0:	lodsb
+	stosb				;copy to BAK file path
+	or al,al	
+	jne SF0
+	dec edi
+	push byte '~'			;add BAK file extension
+	pop eax
+	stosw				;stosw not stosb because ascii-ZERO
+	pop edi	
+%ifdef BEOS
+	push edi
+	mov ebx,0xFFFFFFFF
+	mov edx,ebx
+	mov ecx,filepath
+	mov edi,bakpath
+%endif
+	cmp dword [ecx],'/tmp'
+	je no_ren
+	call RenameFile			;ecx is filepath
+no_ren:
+%ifdef BEOS
+	pop edi
+%endif
+;-------
+%ifdef BEOS
+	mov ebx,0xFFFFFFFF
+	mov ecx,filepath
+	mov edx,0x777
+%else
+	mov ecx,O_WRONLY_CREAT_TRUNC
+	mov edx,[perms]
+%endif
+	call OpenFile
+OSejmp0:js OSejmp9			;OSerror
+	xchg ebx,eax			;file descriptor  (xchg is only 1 byte)
+;-------
+%ifdef LINUX
+	mov ecx,[giduid]
+	mov edx,ecx
+	shr edx,16
+	and ecx,0xffff
+	call ChownFile
+%else
+%ifndef BEOS
+	mov edx,[gid]
+	mov ecx,[uid]
+	call ChownFile
+%endif	
+%endif
+;-------	
+	mov ecx,sot			;ecx=bof
+	mov edx,ebp			;eof
+SaveFile2:sub edx,ecx			;edx=fileesize= eof-bof
+	call WriteFile			;ebx=file descriptor
+OSejmp9:js OSejmp			;OSerror
+	mov word[errno],5		;just in case of....
+	cmp eax,edx			;all written?
+	jnz near OSerror
+	call CloseFile
+	js OSejmp			;OSerror
+SaveFile3:ret
+;-------
+;  save block (called by ^KW)
+;
+SaveBlock:call GetBlockName
+	jc near DE2
+%ifdef BEOS
+	mov ebx,0xFFFFFFFF
+	mov ecx,blockpath
+	mov edx,0x777
+%else
+	mov ecx,O_WRONLY_CREAT_TRUNC
+	mov ebx,blockpath
+	mov edx,PERMS
+%endif
+	call OpenFile
+	js OSejmp			;OSerror
+	mov ecx,esi			;= block begin
+	mov edx,[blockende]
+	xchg ebx,eax			;file descriptor  (xchg is only 1 byte)
+	jmp short SaveFile2
+;-------
+; read a block into buffer (by ^KR)
+;
+ReadBlock:call GetBlockName
+	jc near DE2
+%ifdef BEOS
+	xor ebx,ebx
+	mov edx,ebx
+	dec ebx				;edx==0,ebx==-1
+	mov ecx,blockpath
+%else
+	mov ebx,blockpath
+%endif
+	call OpenFile0
+OSejmp:	js OSerror
+	call Seek
+	js OSerror
+	push eax			;eax=fileesize
+	call InsertByte
+	pop edx				;file size
+	jc SaveFile3			;ret if cy InsertByte told an error message itself
+	mov ecx,edi			;^offset akt ptr
+	call ReadFile
+	js preOSerror			;to delete inserted bytes (# in EDX)
+	mov ecx,eax    			;bytes read
+	call CloseFile
+	js OSerror
+	mov word[errno],5		;just in case of....
+	cmp edx,ecx			;all read?
+	jnz OSerror
+	ret
+;-------
+preOSerror:mov eax,edx			;count bytes
+	call DeleteByte			;delete space reserved for insertation
+OSerror:push edi
+	mov edi,error+8			;where to store ASCII value of errno
+	mov eax,[errno]
+	push eax
+	call IntegerToAscii
+	pop ecx				;for getting error text via LookPD2
+	mov edi,errmsgs
+	cmp byte [edi],0		;are text error messages loaded ?
+	jz DE0				;so no text available...
+	call LookPD2			;look message # (ecx) in line number #
+	mov esi,edi
+	mov edi,error+9
+	push byte 80			;max strlen / compare errlen equ 100
+	pop ecx
+	cld
+	rep movsb
+DE0:	mov esi,error
+	pop edi
+DE1:	call WriteMess9
+	call GetChar
+DE2:	;continued...
+;----------------------------------------------------------------------
+;
+; more STATUS LINE maintaining subroutines
+;
+RestoreStatusLine:pusha			;important e.g. for asksave
+	call InitStatusLine
+	mov ecx,[columns]		;width
+	cmp cl,stdtxtlen+15+5+2		;this window is too small
+	jb RSno_lineNr
+	mov bl, byte [changed]
+	mov byte[screenline+1],bl	;changed status
+	mov ebx,'INS '			;Insert
+	cmp byte [insstat],1
+	jz RSL1
+	mov ebx,'OVR '			;Overwrite
+RSL1:	mov [screenline+4],ebx		;mode status
+	mov edi,screenline+stdtxtlen
+	sub ecx,stdtxtlen+15+5		;space for other than filename
+	mov esi,filepath
+RSL2:	lodsb
+	or al,al
+	jz RSL4
+	stosb
+	loop RSL2
+RSL4:	mov edi,screenline-15
+	add edi,[columns]
+	mov eax,[columne]
+	inc eax				;start with 1
+	call IntegerToAscii
+	mov byte [edi],':'		;delimiter ROW:COL
+	dec edi
+	mov eax,[linenr]
+	call IntegerToAscii
+RSno_lineNr:call StatusLineShow		;now write all at once
+	popa
+	stc				;error status only important if called via OSError
+	ret
+;-------
+;
+; write an answer prompt into status line
+; (with and without re-initialisation)
+; expecting esi points to ASCIIZ or 0A terminated string
+;
+WriteMess9MakeLine:call InitStatusLine
+WriteMess9:pusha
+	mov edi,screenline
+	cld
+WriteMLoop:lodsb
+	or al,al
+	jz WriteMEnd
+	cmp al,0ah			;for error messages
+	jz WriteMEnd
+	stosb
+	jmp short WriteMLoop
+WriteMEnd:call StatusLineShow
+	popa
+	jmp KursorStatusLine
+;-------
+; a helper for other status line functions:
+; simply init an empty line  
+;
+InitStatusLine:pusha			;simply init an empty line
+	mov edi,screenline
+	mov al,SPACECHAR
+	mov ecx,[columns]
+%ifndef LINUX
+	dec ecx				;? FreeBSD	
+%endif
+	cld
+	rep stosb
+	mov al,0			;prepare ASCIIZ string
+	stosb
+	popa
+	ret
+;-------
+; read a file name for block operations
+; expecting message text ptr in esi
+;
+GetBlockName:pusha
+	mov esi,block
+	mov ecx,blockpath
+	call InputString0		;cy if empty string
+	pushf
+	call RestKursPos
+	popf
+	popa      
+	ret
+;-------
+; helper for NewFile
+;
+InitVars:mov byte [text],NEWLINE	;don't touch esi!
+	mov byte [changed],UNCHANGED
+	xor eax,eax
+	mov dword [oldQFpos],eax
+	mov byte[bereitsges],al
+	mov [blockbegin],eax
+	mov [blockende],eax
+	mov [endeedit],al
+	mov dword[old],sot
+	inc eax
+	mov dword [linenr],eax
+	mov byte [showblock],al
+	mov byte [insstat],al
+	mov dword [maxlen],max
+	mov dword [error],'ERRO'
+	mov dword [error+4],'R   '
+	mov dword [perms],PERMS
+	dec eax
+	dec eax
+%ifdef LINUX
+	mov dword [giduid],eax		; eax == -1 i.e. no changes in fchown
+%else
+%ifndef BEOS
+	mov dword [gid],eax
+	mov dword [uid],eax
+%endif
+%endif
+	ret
+;-------
+ReadResource:
+%ifdef BEOS
+	xor ebx,ebx
+	mov edx,ebx
+	dec ebx				;edx==0,ebx==-1
+	mov ecx,resfile			;load file with some error message text
+%else
+	mov ebx,resfile			;load file with some error message text
+%endif
+	call OpenFile0			;don't care about errors
+	js RRret
+	xchg ebx,eax			;mov file_descriptor to ebx (xchg is 1 byte only)
+	mov edx,errbufsize
+	mov ecx,errmsgs
+	call ReadFile
+	jns near CloseFile
+RRret:	ret
+;-------
+%ifdef BEOS
+Seek:	xchg ebx,eax			;mov file_descriptor to ebx (xchg is 1 byte only)
+	push byte 2
+	pop edx
+	call SeekFile			;end
+	js SeekRet
+	xor edx,edx
+	push eax
+	call SeekFile			;home
+	pop eax
+SeekRet:ret
+%else
+%ifdef LINUX
+Seek:	xchg ebx,eax			;mov file_descriptor to ebx (xchg is 1 byte only)
+	push byte 2
+	pop edx
+	call SeekFile			;end
+	js SeekRet
+	xor edx,edx
+	push eax
+	call SeekFile			;home
+	pop eax
+SeekRet:ret
+%else					;64 bit
+Seek:	push edi
+	push esi	
+	mov ebx,eax			;file desc
+	xor edx,edx
+	xor edi,edi
+	push byte 2
+	pop esi
+	call SeekFile			;end
+	js SeekRet
+	xor esi,esi	
+	push eax
+	call SeekFile			;home
+	pop eax
+SeekRet:pop esi
+	pop edi
+	ret
+%endif
+%endif
+;----------------------------------------------------------------------
+;
+; FIND/REPLACE related stuff
+;
+AskForReplace:mov esi,askreplace1
+	mov ecx,suchtext
+	call InputString0
+	jc AskFor_Ex
+	mov [suchlaenge],eax
+	mov esi,askreplace2
+	mov ecx,replacetext
+	call InputString0
+	jmp short GetOptions		;cy flag is allowed here 18.6.00
+AskForFind:mov esi,askfind
+	mov ecx,suchtext
+	call InputString0
+	jc AskFor_Ex
+GetOptions:mov [repllaenge],eax
+	mov esi,optiontext
+	call InputStringWithMessage	;empty string is allowd for std options...
+	call ParseOptions		;...(set in ParseOptions)
+	clc
+AskFor_Ex:jnc AFE2
+	mov byte [bereitsges],0
+AFE2:	pushf
+	call RestoreStatusLine
+	call RestKursPos	
+	popf
+	ret
+;-------
+; check string for 2 possible options: C,c,B,b  (case sensitive & backward)  
+; 
+ParseOptions:push esi
+	cld
+	mov esi, optbuffer
+	push byte 1
+	pop dword[vorwarts]		;mov dword[vorwarts],1 is longer
+	mov byte[grossklein],0dfh
+Scan1:	lodsb
+	and al,5fh			;upper case
+	cmp al,'C'
+	jnz notCopt
+	xor byte[grossklein],20h	;result 0dfh,   2*C is like not C option
+notCopt:cmp al,'B'
+	jnz notBopt
+	neg dword[vorwarts]		;similar 2*B is backward twice i.e. forward
+notBopt:or al,al
+	jnz Scan1
+	pop esi
+	ret
+;-------
+; the find subroutine itself
+;
+find2:	mov ebx,edi
+find3:	lodsb
+	or al,al			;=end?
+	jz found
+	cmp al,41h
+	jb find7
+	and al,ch
+find7:	inc edi
+	mov cl,byte [edi]
+	cmp cl,41h
+	jb find10
+	and cl,ch
+find10:	cmp al,cl
+	jz find3
+	mov edi,ebx
+FindText:mov edx,[vorwarts]		;+1 or -1
+	mov ch,[grossklein]		;ff or df
+	mov esi,suchtext
+	cld
+	lodsb
+	cmp al,41h
+	jb find1
+	and al,ch
+find1:	add edi,edx			;+1/-1
+	mov cl,byte [edi]
+	cmp cl,41h
+	jb find6
+	and cl,ch
+find6:	cmp al,cl
+	je find2
+	cmp edi,ebp
+	ja notfound
+	cmp edi, sot
+	jnb find1
+notfound:stc
+	ret
+found:	mov edi,ebx
+	clc				;edi points after location
+	ret
+;----------------------------------------------------------------------
+;
+; some GENERAL helper functions
+;
+GetAsciiToInteger:
+	mov esi,asklineno
+	call InputStringWithMessage
+	pushf
+	call AskFor_Ex			;repair status line & set cursor pos
+	mov esi,ecx			;optbuffer
+	xor ecx,ecx
+	xor eax,eax	
+	popf
+	jc AIexit
+	cld
+AIload:	lodsb
+	sub al,'0'
+	js AIexit
+	cmp al,9
+	ja AIexit
+	lea ecx,[ecx+4*ecx]
+	lea ecx,[2*ecx+eax]
+	jmp short AIload
+AIexit:	cmp ecx,1			;ret ecx ,  cy if err
+	ret
+;-------
+;
+; expects current column in edx
+; returns # spaces up to next tabulated location in AH
+;
+SpacesForTab:push ecx
+	mov eax,edx
+	mov cl,TAB
+	div cl
+	neg ah				;ah = modulo division
+	add ah,TAB			;TAB - pos % TAB
+	pop ecx
+	ret
+;----------------------------------------------------------------------
+;
+; INTERFACE to OS kernel
+; we differ between BeOS, Linux and any else (in fact only FreeBSD)
+;
+ReadFile0:xor ebx,ebx			;mov ebx,stdin		;file desc
+ReadFile:
+%ifdef BEOS
+	push dword 2			;4+X? stack places 
+	jmp short WFile
+%else
+	mov al,3			;system call number (sys_read) ;return read byte EAX
+	jmp short IntCall		;ebx file / ecx buffer / edx count byte
+%endif
+;-------
+WriteFile0:xor ebx,ebx			;mov ebx,stdout		;file desc
+	inc ebx				;ditto
+WriteFile:
+%ifdef BEOS
+	mov eax,3			;4+X?  stack places
+	push dword 3
+WFile:	pop eax
+	call IntRdWr
+	nop
+	nop
+	nop
+	nop
+	ret 
+%else
+	mov al,4			;system call number (sys_write)
+	jmp short IntCall
+%endif
+;-------
+OpenFile0:
+%ifndef BEOS
+	xor ecx,ecx			;i.e O_RDONLY
+%endif
+OpenFile:
+%ifdef BEOS
+	mov al,0			;5 stack places
+	push edi
+	mov edi,0x1A4
+	call IntCall
+	pop edi
+	ret
+%else
+	mov al,5			;system call number
+	jmp short IntCall		;ecx mode / ebx path / edx permissions (if create)
+%endif
+	
+;-------
+CloseFile:
+%ifdef BEOS
+	mov al,1			;1 stack place
+%else
+	mov al,6			;system call number (close)
+%endif
+	jmp short IntCall		;ebx is file desc
+;-------
+Fstat:	
+%ifdef BEOS
+	xor eax,eax			;dummy
+	ret
+%endif
+	mov ecx,fstatbuf
+%ifdef LINUX
+	mov al,108
+%else
+	mov al,189
+%endif	
+	jmp short IntCall
+;-------
+RenameFile:
+%ifdef BEOS
+	mov al,26h			;4 stack places
+	jmp short IntCall
+%else
+%ifdef LINUX
+	mov al,38
+%else
+	mov al,128
+%endif
+	jmp short IntCall
+%endif
+;-------
+ChownFile:
+%ifdef BEOS
+	xor eax,eax			;dummy
+	ret
+%endif
+%ifdef LINUX
+	mov al,95
+%else
+	mov al,123			;fchown
+%endif
+	jmp short IntCall
+;-------
+SysBrk:	
+%ifdef BEOS
+	xor eax,eax			;dummy
+	ret
+%endif
+%ifdef LINUX
+	mov al,45			;system call number
+%else
+	mov al,69
+%endif	
+	jmp short IntCall		;ebx addr
+;-------
+IOctlTerminal0:mov edx,orig
+IOctlTerminal:mov ebx,stdin		;expects EDX termios or winsize structure ptr
+%ifdef BEOS
+	mov al,4			;4 stack places
+%else
+	mov al,54			;54 == the ioctl syscall no.
+%endif
+	jmp short IntCall		;ECX TCSETS,TCGETS,TIOCGWINSZ
+;------
+Exit:	
+%ifdef BEOS
+	mov al,3fh
+%else
+	mov al,1
+%endif	
+	xor ebx,ebx
+	jmp short IntCall
+;-------
+SeekFile:xor ecx,ecx			;ecx offset / ebx file / edx method
+%ifdef BEOS
+	mov al,5			;4 stack places (using 64 bit for ptr)
+	push edi
+	push edx
+	mov edi,edx
+	xor edx,edx
+	call IntCall
+	pop edx
+	pop edi
+	ret
+%else
+%ifdef LINUX
+	mov al,19			;system call number (lseek)
+%else
+	xor edx,edx
+	xor edi,edi
+	mov al,199
+%endif
+%endif
+;-------
+IntCall:mov ah,0
+	cwde				;(and eax,0ffh)
+%ifdef BEOS
+	push edi
+	push byte 0
+	push edi
+	push edx
+	push ecx
+	push ebx
+	push dword be_ret
+	int 25h
+be_ret:	pop ebx
+	pop ebx
+	pop ecx
+	pop edx
+	pop edi
+	pop edi
+	mov [errno],eax
+	and dword [errno],7Fh
+	or eax,eax			;set flags also	
+	pop edi
+%else
+%ifdef LINUX
+	int 80h				
+%else	
+	push esi
+	push edi
+	push edx
+	push ecx
+	push ebx
+	push eax
+	call 7:0
+	pop ebx
+	pop ebx
+	pop ecx
+	pop edx
+	pop edi
+	pop esi
+	jc err
+%endif
+	neg eax
+err:	mov [errno],eax
+	neg eax				;set flags also
+%endif	
+	ret
+;-------
+%ifdef BEOS
+IntRdWr:push edx			;used for Read & Write
+	push ecx
+	push ebx
+	push dword be_ret2
+	int 25h
+be_ret2:pop ebx
+	pop ebx
+	pop ecx
+	pop edx
+	mov [errno],eax
+	pop eax
+	add eax,4
+	push eax
+	mov eax,[errno]
+	and dword [errno],7Fh
+	or eax,eax			;set flags
+	ret
+%endif
+;----------------------------------------------------------------------
+;
+; CONSTANT DATA AREA
+;
+Ktable	db 45h	;^K@	xlatb table for making pseudo-scancode
+	db 45h	;^ka	45h points to an an offset in jumptab1
+	db 41h	;^kb	41h for example points to KeyCtrlKB function offset
+	db 43h	;^kc
+	db 5dh	;^kd
+	db 45h	;^ke	45h means SimpleRet i.e. 'do nothing'
+	db 45h	;^kf
+	db 45h	;^kg
+	db 57h	;^kh
+	db 45h	;^ki
+	db 45h	;^kj
+	db 42h	;^kk
+	db 45h	;^kl
+	db 45h	;^km
+	db 45h	;^kn
+	db 45h	;^ko
+	db 45h	;^kp
+	db 46h	;^kq
+	db 3dh	;^kr
+	db 5ch	;^ks
+	db 45h	;^kt
+	db 45h	;^ku
+	db 3bh	;^kv
+	db 3eh	;^kw
+	db 44h	;^kx
+	db 4eh	;^ky
+	db 45h	;^kz
+Qtable	db 45h	;^q@	ditto for ^Q menu
+	db 54h	;^qa
+	db 5ah	;^qb
+	db 61h	;^qc former 76h ctrl-PageDown
+	db 4fh	;^qd
+	db 58h	;^qe
+	db 55h	;^qf
+	db 45h	;^qg
+	db 4Ah	;^qh, ^qDEL
+	db 62h	;^qi
+	db 45h	;^qj
+	db 5bh	;^qk
+	db 45h	;^ql
+	db 45h	;^qm
+	db 45h	;^qn
+	db 45h	;^qo
+	db 4ch	;^qp
+	db 45h	;^qq
+	db 63h	;^qr former ctrl-PageUp
+	db 47h	;^qs
+	db 45h	;^qt
+	db 45h	;^qu
+	db 56h	;^qv
+	db 5Eh	;^qw former 73h ctrl-left
+	db 59h	;^qx
+	db 40h	;^qy
+	db 5fh	;^qz former 74h ctrl-right
+
+esize equ 2	;(byte per entry)
+jumptab1:	;Storing 16 bit offsets is valid only for code less size 64 kbyte...
+		;  ... but in assembler that should never be a problem   ;)
+		; The associated key values originaly were BIOS scan codes...
+		;  ... now using terminal device this does have less sense, so I altered some 
+		;  ... special cases, like ^PageUp (was 84h, but extends the table too much)
+		;  ... to some places shortly after 5dh (i.e. shift F10).
+		; Using terminals the F-keys are not yet supported (was DOS only). 
+lowest 	equ 3bh	
+	dw KeyCtrlKV	-_start	;3bh  ^KV  F1 (DOS only)
+	dw KeyCtrlL	-_start	;3ch  ^L   F2 (ditto)
+	dw KeyCtrlKR	-_start	;3dh  ^KR  F3 (etc)
+	dw KeyCtrlKW	-_start	;3eh  ^KW
+	dw KeyCtrlT	-_start	;3fh  ^T
+	dw KeyCtrlQY	-_start	;40h  ^QY
+	dw KeyCtrlKB	-_start	;41h  ^KB
+	dw KeyCtrlKK	-_start	;42h  ^KK
+	dw KeyCtrlKC	-_start	;43h  ^KC
+	dw KeyCtrlKX	-_start	;44h  ^KX  F10
+	dw SimpleRet	-_start	;45h       F11
+	dw KeyCtrlKQ	-_start	;46h       F12
+	dw KeyHome	-_start	;47h
+	dw KeyUp	-_start	;48h
+	dw KeyPgUp	-_start	;49h
+	dw KeyCtrlQDel	-_start	;4ah ^QDel
+	dw KeyLeft	-_start	;4bh
+	dw KeyCtrlQP	-_start	;(5 no num lock) 
+	dw KeyRight	-_start	;4dh
+	dw KeyCtrlKY	-_start	;(+)  ^KY
+	dw KeyEnd	-_start	;4fh
+	dw KeyDown	-_start	;50H
+	dw KeyPgDn	-_start	;51h
+	dw KeyIns	-_start	;52H
+	dw KeyDel	-_start	;53H
+	dw KeyCtrlQA	-_start	;54h ^QA sF1
+	dw KeyCtrlQF	-_start	;55h ^QF sF2
+	dw KeyCtrlQV	-_start	;56h
+	dw KeyCtrlKH	-_start	;57h
+	dw KeyCtrlQE	-_start	;58h
+	dw KeyCtrlQX	-_start	;59h
+	dw KeyCtrlQB	-_start	;5Ah ^QB
+	dw KeyCtrlQK	-_start	;5Bh ^QK  sF8
+	dw KeyCtrlKS	-_start	;5ch ^KS  sF9
+	dw KeyCtrlKD	-_start	;5dh ^KD  sF10
+	;
+	dw KeyCtrlLeft	-_start	;5eh	^Left was 73h  (compare notes above)
+	dw KeyCtrlRight	-_start	;5fh	^Right (was 74h)
+	dw SimpleRet	-_start	;60h	^End (was 75h)
+	dw KeyCtrlQC	-_start	;61h	^PageDown (was 76h)
+	dw KeyCtrlQI	-_start	;62h	^Home  (was 77h)
+	dw KeyCtrlQR	-_start	;63h	^PageUp (was 84h)
+jumps1 equ ($-jumptab1) / esize
+
+jumptab3 dw SimpleRet	-_start	;^@	(only former DOS version has a "jumptab2")
+	dw KeyHome	-_start	;^a	(compare notes above)
+	dw SimpleRet	-_start	;^b
+	dw KeyPgDn	-_start	;^c
+	dw KeyRight	-_start ;^d
+	dw KeyUp	-_start	;^e
+	dw KeyEnd	-_start	;^f
+	dw KeyDel	-_start	;^g 7
+	dw KeyDell	-_start	;^h 8   DEL (7fh is translated to this)
+	dw NormChar	-_start	;^i 9
+	dw KeyRet	-_start	;^j = 0ah
+	dw CtrlKMenu	-_start	;^k b
+	dw KeyCtrlL	-_start	;^l c
+	dw SimpleRet	-_start	;^m 0dh
+	dw SimpleRet	-_start	;^n e
+	dw SimpleRet	-_start	;^o f
+	dw SimpleRet	-_start	;^p 10
+	dw CtrlQMenu	-_start	;^q 11
+	dw KeyPgUp	-_start	;^r 12
+	dw KeyLeft	-_start	;^s 13
+	dw KeyCtrlT	-_start	;^t 14
+	dw SimpleRet	-_start	;^u 15
+	dw KeyIns	-_start	;^v 16
+	dw SimpleRet	-_start	;^w 17
+	dw KeyDown	-_start	;^x 18
+	dw KeyCtrlY	-_start	;^y 19
+	dw SimpleRet	-_start	;^z
+	dw SimpleRet	-_start	;esc
+;-------
+filename	db '   NAME:',0
+filesave	db '   SAVE:',0
+asksave		db 'SAVE? Y/N',0
+block		db 'BLK NAME:',0
+askfind		db '^QF FIND:',0
+askreplace1	db '^QA REPL:',0
+askreplace2	db '^QA WITH:',0
+asklineno	db '^QI LINE:',0
+optiontext	db 'OPT? C/B',0
+stdtxtlen	equ 10
+;
+screencolors0	db 27,'[40m',27,'[37m'
+bold0		db 27,'[0m'		;reset to b/w
+screencolors1	db 27,'[44m',27,'[33m'	;yellow on blue
+reversevideoX:
+bold1		db 27,'[1m'		;bold 
+scolorslen	equ $-screencolors1
+boldlen		equ $-bold1		;take care length of bold0 == length of bold1
+%ifdef LINUX
+		db 27,'[7m'		;good for "linux" terminal on /dev/tty (but not xterm,kvt)
+					;again take care length = length of boldX
+					;!! important: store directly after bold1 !!
+%endif
+;
+O_WRONLY_CREAT_TRUNC equ 1101q
+O_RDONLY	equ 0
+PERMS		equ 644q
+
+resfile		db LIBDIR,'e3.res',0
+helpfile	db LIBDIR,'e3.hlp',0
+stdin		equ 0
+stdout 		equ 1
+;
+TAB		equ 8
+TABCHAR		equ 09h 		; ^I
+SPACECHAR	equ ' '
+CHANGED		equ '*'
+UNCHANGED	equ SPACECHAR
+LINEFEED	equ 0ah
+NEWLINE		equ LINEFEED
+%ifdef CRIPLED_ELF
+ filesize      equ     $ - $$
+%endif
+;-----------------------------------------------------------------------
+;section .data				;unused: save byte in ELF header
+;bits 32
+;-----------------------------------------------------------------------
+section .bss
+bits 32
+
+%ifdef CRIPLED_ELF
+ align 4
+ bssstart:
+%endif
+
+screenbuffer	resb 62*(160+32)	;estimated 62 lines 160 columns, 32 byte ESC seq (ca.12k)
+screenbuffer_end equ $			;If you really have higher screen resolution,
+					;...no problem, except some useless redrawing happens.
+termios_size	equ 60
+termios		resb termios_size
+orig		resb termios_size
+
+winsize_size	equ 8
+winsize		resb winsize_size
+
+setkplen	equ 10
+setkp		resb setkplen		;to store cursor ESC seq like  db 27,'[000;000H'
+resb		2			;fill up
+
+%ifdef LESSWRITEOPS_OR_CURSORMGNT
+revvoff		resd 1
+%endif
+
+;;bufptr		resd 1
+lines		resd 1			;equ 24 or similar i.e. screen lines-1 (1 for statusline)
+columns		resd 1			;equ 80 or similar dword (using only LSB)
+
+columne		resd 1			;helper for display of current column
+zloffst		resd 1			;helper: chars scrolled out at left border
+fileptr		resd 1			;helper for temp storage of current pos in file
+kurspos		resd 1			;cursor position set by DispNewScreen()
+kurspos2	resd 1			;cursor position set by other functions
+
+tabcnt		resd 1			;internal helper byte in DispNewScreen() only
+changed		resd 1			;status byte: (UN)CHANGED
+oldQFpos	resd 1
+bereitsges	resd 1			;byte used for ^L
+blockbegin	resd 1
+blockende	resd 1
+endeedit	resd 1			;byte controls program exit
+old		resd 1			;helper for ^QP
+veryold		resd 1			;ditto
+linenr		resd 1			;current line
+showblock	resd 1			;helper for ^KH
+suchlaenge	resd 1			;helper for ^QA,^QF
+repllaenge	resd 1
+vorwarts	resd 1
+grossklein	resd 1			;helper byte for ^QF,^QA
+
+ch2linebeg	resd 1			;helper keeping cursor pos max at EOL (up/dn keys)
+numeriere	resd 1			;byte controls re-numeration
+read_b		resd 1			;buffer for getchar
+isbold		resd 1			;control of bold display of ws-blocks
+inverse		resd 1
+insstat		resd 1
+errno		resd 1			;used similar libc, but not excactly equal
+
+errlen		equ 100
+error		resb errlen		;reserved space for string: 'ERROR xxx:tttteeeexxxxtttt',0
+
+maxlen		resd 1
+stat		resd 1
+;-------
+;
+maxfilenamelen	equ 255
+filepath	resb maxfilenamelen+1
+bakpath		resb maxfilenamelen+1
+
+blockpath	resb maxfilenamelen+1
+replacetext	resb maxfilenamelen+1
+suchtext	resb maxfilenamelen+1
+optbuffer	resb 8			;buffer for search/replace options and for ^QI
+optslen		equ $-optbuffer
+
+%ifdef LINUX
+ giduid		resd 1
+%else
+ uid		resd 1
+ gid		resd 1
+%endif
+perms		resd 1
+fstatbuf	resb 64
+screenline	resb 256+4*scolorslen	;max possible columns + 4 color ESC seq per line
+					;(buffer for displaying a text line)
+errbufsize	equ 4000
+errmsgs		resb errbufsize
+;-------
+%ifdef LINUX
+max		equ 102400		;valid for NEW created files only
+%else
+max		equ 10240000		;FIXME: brk in FreeBSD ??
+%endif
+;-------
+text		resb max
+sot 		equ (text+1)		;start-of-text
+
+%ifdef CRIPLED_ELF
+ bsssize equ $-bssstart
+%endif 
+;----------------------------------------------------------------------
+;

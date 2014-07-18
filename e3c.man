@@ -1,0 +1,173 @@
+.TH E3 1
+
+.SH NAME
+E3C \- A mini text editor
+
+.SH SYNOPSIS
+.B e3c
+[\fifilename]
+
+.SH DESCRIPTION
+.PP
+\fIe3c\fP is a complete mini editor using Wordstar features.
+
+.SH KEYBOARD COMMANDS
+.PP
+.TP
+\fB^C
+Go page down
+.TP
+\fB^D
+Go right
+.TP
+\fB^E
+Go up
+.TP
+\fB^I
+Tabulator
+.TP
+\fB^KB
+Set block start marker
+.TP
+\fB^KC
+Copy current block
+.TP
+\fB^KD
+Save file and load a new one
+.TP
+\fB^KK
+Set block end marker
+.TP
+\fB^KQ
+Abort editing and exit. Confirm with Y or y that your changes are lost.
+.TP
+\fB^KR
+Insert a file as a new block
+.TP
+\fB^KS
+Save file and continue editing
+.TP
+\fB^KV
+Move current block inside file
+.TP
+\fB^KW
+Save a block into a file
+.TP
+\fB^KX
+Save file and exit
+.TP
+\fB^KY
+Delete text a block
+.TP
+\fB^QA
+Search & Replace (a prompt appears). For options compare ^QF. 
+.TP
+\fB^QB
+Go to block begin
+.TP
+\fB^QC
+Go to end of file
+.TP
+\fB^QD
+Go to end of line
+.TP
+\fB^QE
+Go to top of screen: 1st columne, 1st line
+.TP
+\fB^QF
+Find a text string (a prompt appears). Valid options are \fIC\fPase sensitive and \fIB\fPackward.
+You could abort via pressing ^U .
+.TP
+\fB^QG
+Delete character under cursor
+.TP
+\fB^QG
+Delete character left of cursor
+.TP
+\fB^QH,^Q(Del)
+Delete up to line begin
+.TP
+\fB^QI
+Go to line number (prompt appears)
+.TP
+\fB^QK
+Go to block end
+.TP
+\fB^QR
+Go to file begin
+.TP
+\fB^QS
+Go to line begin
+.TP
+\fB^QV
+Go to last postion of find
+.TP
+\fB^QW
+Go to previous word
+.TP
+\fB^QX
+Go to bottom of window (last line, end of line)
+.TP
+\fB^QY
+Delete to line end
+.TP
+\fB^QZ
+Go to next word
+.TP
+\fB^R
+Go page up
+.TP
+\fB^S
+Go left
+.TP
+\fB^T
+Delete to next word
+.TP
+\fB^U
+Abort input in status line (this is used for ^QI,^QF,^KR,^KW etc.)
+.TP
+\fB^V
+Toggle insert mode
+.TP
+\fB^X
+Go down
+.TP
+\fB^Y
+Delete current line
+
+.SH OPTIONS
+.PP
+e3c accepts a filename for text editing.
+
+.SH FILES
+.PP
+.TP
+\fBe3c 
+is a 'C' compiled executable for some other platforms where e3 is not available.
+.TP
+\fBe3ws.hlp
+help text file
+.TP
+\fBe3.res
+error message text file
+
+.SH COPYRIGHT
+e3,e3c  Copyright (c) 2000 Albrecht Kleine
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+.SH BUGS
+There probably are some, but I don't know what they are yet.
+Caution: there's no UNDO feature.
